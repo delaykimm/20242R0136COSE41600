@@ -131,38 +131,71 @@ def calculate_height_map(points, x_bins, y_bins, threshold = 0.2):
     print(f"[DEBUG] Height map size after filling missing values: {len(height_map)}")
     
     # Step 3: Post-processing based on neighbor differences
+    # processed_height_map = {}
+    # for (i, j), height in height_map.items():
+    #     # Collect neighbor heights
+    #     neighbors = [
+    #         height_map.get((i - 1, j)),  # left
+    #         height_map.get((i + 1, j)),  # right
+    #         height_map.get((i, j - 1)),  # bottom
+    #         height_map.get((i, j + 1))   # top
+    #     ]
+    #     # Remove None values from neighbors
+    #     neighbors = [h for h in neighbors if h is not None]
+
+    #     if neighbors:
+    #         # Calculate the maximum positive difference with neighbors
+    #         max_difference = max([height - neighbor for neighbor in neighbors])
+
+    #         # If the difference exceeds the threshold, replace with the smallest neighbor value
+    #         if max_difference > threshold:
+    #             smallest_neighbor = min(neighbors)
+    #             print(f"[DEBUG] Outlier detected at ({i}, {j}) with height {height} and max diff {max_difference}. Replacing with {smallest_neighbor}")
+    #             processed_height_map[(i, j)] = smallest_neighbor
+    #         else:
+    #             processed_height_map[(i, j)] = height
+    #     else:
+    #         # No neighbors, retain original height
+    #         processed_height_map[(i, j)] = height
+
+    # print(f"[DEBUG] Processed height map size: {len(processed_height_map)}")
+    # return processed_height_map
+    grid_keys = np.array(list(height_map.keys()))
+    grid_values = np.array([v for v in height_map.values() if v is not None])
+    grid_centers = np.array([((x_bins[i] + x_bins[i + 1]) / 2, (y_bins[j] + y_bins[j + 1]) / 2) for i, j in grid_keys])
+
+    kdtree = cKDTree(grid_centers)
+
+    # Step 3: Post-processing based on 2m neighbor differences
     processed_height_map = {}
     for (i, j), height in height_map.items():
-        # Collect neighbor heights
-        neighbors = [
-            height_map.get((i - 1, j)),  # left
-            height_map.get((i + 1, j)),  # right
-            height_map.get((i, j - 1)),  # bottom
-            height_map.get((i, j + 1))   # top
-        ]
-        # Remove None values from neighbors
-        neighbors = [h for h in neighbors if h is not None]
+        if height is None:
+            continue
 
-        if neighbors:
-            # Calculate the maximum positive difference with neighbors
-            max_difference = max([height - neighbor for neighbor in neighbors])
+        # Current grid center
+        center_x = (x_bins[i] + x_bins[i + 1]) / 2
+        center_y = (y_bins[j] + y_bins[j + 1]) / 2
+        center = np.array([center_x, center_y])
 
-            # If the difference exceeds the threshold, replace with the smallest neighbor value
-            if max_difference > threshold:
-                smallest_neighbor = min(neighbors)
-                print(f"[DEBUG] Outlier detected at ({i}, {j}) with height {height} and max diff {max_difference}. Replacing with {smallest_neighbor}")
+        # Find neighbors within the search radius
+        indices = kdtree.query_ball_point(center, r=1)
+        neighbor_heights = [grid_values[idx] for idx in indices if grid_values[idx] is not None]
+
+        if neighbor_heights:
+            smallest_neighbor = min(neighbor_heights)
+            if abs(height - smallest_neighbor) > threshold:
+                print(f"[DEBUG] Outlier detected at ({i}, {j}) with height {height} and replaced with {smallest_neighbor}")
                 processed_height_map[(i, j)] = smallest_neighbor
             else:
                 processed_height_map[(i, j)] = height
         else:
-            # No neighbors, retain original height
             processed_height_map[(i, j)] = height
 
     print(f"[DEBUG] Processed height map size: {len(processed_height_map)}")
     return processed_height_map
 
 # 4. 시각화 함수
-def visualize_point_clouds(pcd_list, window_name="ROR Visualization", point_size=1.0):
+def visualize_point_clouds(pcd_list, window_name="ROR Visualization", point_size=0.5):
     # 단일 객체를 리스트로 변환
     if isinstance(pcd_list, o3d.geometry.PointCloud):
         pcd_list = [pcd_list]
@@ -176,8 +209,8 @@ def visualize_point_clouds(pcd_list, window_name="ROR Visualization", point_size
     vis.destroy_window()
 
 # 메인 실행 코드
-file_path = "data/05_straight_duck_walk/pcd/pcd_000370.pcd"
-#file_path = "data/01_straight_walk/pcd/pcd_000100.pcd"
+#file_path = "data/05_straight_duck_walk/pcd/pcd_000370.pcd"
+file_path = "data/01_straight_walk/pcd/pcd_000100.pcd"
 original_pcd = o3d.io.read_point_cloud(file_path)
 print(f"[DEBUG] Original point cloud size: {len(original_pcd.points)}")
 print("[INFO] Visualizing original point cloud...")
@@ -234,7 +267,7 @@ print(f"[DEBUG] Number of x_bins: {len(x_bins)}, Number of y_bins: {len(y_bins)}
 height_map = calculate_height_map(transformed_points, x_bins, y_bins, threshold = 0.05) # threshold : 주변 격자와의 높이차 
 
 # 비바닥 점 필터링
-threshold = 0.1 # threshold : 
+threshold = 0.2 # threshold : 격자의 바닥 높이와의 차
 non_floor_indices = []
 # for idx, (x, y, z) in enumerate(projected_points):
 for idx, (x, y, z) in enumerate(transformed_points):
