@@ -3,12 +3,13 @@ import numpy as np
 import time
 import glob
 import os
+from scipy.spatial import cKDTree
 from sklearn.cluster import DBSCAN
 
 class PedestrianDetector:
     def __init__(self):
         # 탐지 파라미터
-        self.voxel_size = 0.05
+        self.voxel_size = 0.01
         self.cluster_eps = 0.5
         self.min_points = 30
         self.human_height_range = (1.4, 2.0)
@@ -16,36 +17,103 @@ class PedestrianDetector:
         
     def preprocess_pointcloud(self, pcd):
         print("[INFO] Preprocessing point cloud...")
-        # 다운샘플링
-        downsampled = pcd.voxel_down_sample(voxel_size=self.voxel_size)
+
+        # 1. 다운샘플링
+        if len(pcd.points) > 100000:  # 대규모 데이터일 때만 다운샘플링
+            voxel_size = self.voxel_size
+        else:
+            voxel_size = self.voxel_size / 2  # 소규모 데이터는 세밀하게 처리
+        downsampled = pcd.voxel_down_sample(voxel_size=voxel_size)
         if len(downsampled.points) == 0:
             return downsampled
 
         points = np.asarray(downsampled.points)
-        
-        # 로컬 영역별 높이 분석
-        window_size = 1.0  # 로컬 윈도우 크기 (미터)
-        min_points_in_window = 10  # 최소 포인트 수
-        height_threshold = 0.15  # 높이 임계값
-        
-        # KD-tree 구성
-        pcd_tree = o3d.geometry.KDTreeFlann(downsampled)
+
+        # 2. 격자 크기 조정
+        def adjust_grid_size(points, target_bin_count=50):
+            x_range = np.ptp(points[:, 0])
+            y_range = np.ptp(points[:, 1])
+            grid_size = min(x_range, y_range) / target_bin_count
+            return grid_size
+
+        grid_resolution = adjust_grid_size(points, target_bin_count=50)
+        x_min, y_min = np.min(points[:, :2], axis=0)
+        x_max, y_max = np.max(points[:, :2], axis=0)
+        x_bins = np.arange(x_min, x_max, grid_resolution)
+        y_bins = np.arange(y_min, y_max, grid_resolution)
+
+        # 3. 높이 맵 계산 (디버깅 추가)
+        def calculate_height_map(points, x_bins, y_bins):
+            print("[DEBUG] Calculating height map...")
+            # x, y 각각에 대해 np.digitize 수행
+            x_indices = np.digitize(points[:, 0], bins=x_bins) - 1
+            y_indices = np.digitize(points[:, 1], bins=y_bins) - 1
+
+            # x, y 인덱스를 결합하여 2차원 격자 인덱스 생성
+            grid_indices = np.stack((x_indices, y_indices), axis=-1)
+            grid_indices = np.array(grid_indices)  # 비균일 구조 방지
+            print("[DEBUG] grid_indices shape:", grid_indices.shape)
+            print("[DEBUG] grid_indices sample:", grid_indices[:5])
+
+            valid_indices = (grid_indices[:, 0] >= 0) & (grid_indices[:, 0] < len(x_bins) - 1) & \
+                            (grid_indices[:, 1] >= 0) & (grid_indices[:, 1] < len(y_bins) - 1)
+            grid_indices = grid_indices[valid_indices]
+            points = points[valid_indices]
+
+            height_map = {}
+            for i, j in np.unique(grid_indices, axis=0):
+                grid_points = points[(grid_indices[:, 0] == i) & (grid_indices[:, 1] == j)]
+                if len(grid_points) > 0:
+                    z_values = grid_points[:, 2]
+                    z_mean = np.mean(z_values)
+                    z_std = np.std(z_values)
+                    filtered_z = z_values[np.abs(z_values - z_mean) <= z_std]  # 이상치 제거
+                    if len(filtered_z) > 0:
+                        height_map[(i, j)] = np.mean(filtered_z)  # 중간값 대신 평균으로 대체
+
+            print("[DEBUG] height_map keys example:", list(height_map.keys())[:5])
+            print("[DEBUG] height_map values example:", list(height_map.values())[:5])
+            return height_map
+
+        height_map = calculate_height_map(points, x_bins, y_bins)
+
+        # 4. 빈 격자 보완 (디버깅 추가)
+        def fill_empty_grids(height_map, x_bins, y_bins):
+            print("[DEBUG] Filling empty grids...")
+            grid_keys = np.array(list(height_map.keys()))
+            grid_values = np.array(list(height_map.values()))
+            print("[DEBUG] grid_keys shape:", grid_keys.shape)
+            print("[DEBUG] grid_values shape:", grid_values.shape)
+
+            kdtree = cKDTree(grid_keys)
+            filled_map = {}
+            for i in range(len(x_bins) - 1):
+                for j in range(len(y_bins) - 1):
+                    if (i, j) in height_map:
+                        filled_map[(i, j)] = height_map[(i, j)]
+                    else:
+                        # Nearest neighbor 보완
+                        _, idx = kdtree.query([i, j])
+                        filled_map[(i, j)] = float(grid_values[idx])  # 강제 변환
+            return filled_map
+
+        height_map = fill_empty_grids(height_map, x_bins, y_bins)
+
+        # 5. 비바닥 점 필터링 (디버깅 추가)
+        print("[DEBUG] Filtering non-floor points...")
+        threshold = 0.2 # 바닥 근처로 간주할 높이 범위
         non_floor_indices = []
-        
-        # 각 포인트에 대해 로컬 높이 분석
-        for i, point in enumerate(points):
-            # 로컬 영역 내의 포인트 검색
-            [k, idx, _] = pcd_tree.search_radius_vector_3d(point, window_size)
-            
-            if k > min_points_in_window:
-                local_points = points[idx]
-                # 로컬 영역의 최저점으로부터의 높이 차이 계산
-                local_min_height = np.min(local_points[:, 2])
-                height_diff = point[2] - local_min_height
-                
-                if height_diff > height_threshold:
-                    non_floor_indices.append(i)
-        
+
+        for idx, point in enumerate(points):
+            x_idx = np.digitize(point[0], x_bins) - 1
+            y_idx = np.digitize(point[1], y_bins) - 1
+            if x_idx >= 0 and x_idx < len(x_bins) - 1 and y_idx >= 0 and y_idx < len(y_bins) - 1:
+                smoothed_height = height_map.get((x_idx, y_idx), None)
+                if smoothed_height is not None and abs(point[2] - smoothed_height) > threshold:
+                    non_floor_indices.append(idx)
+
+        print("[DEBUG] Total non-floor points:", len(non_floor_indices))
+
         # 비바닥 점 선택
         non_floor_pcd = downsampled.select_by_index(non_floor_indices)
         return non_floor_pcd
@@ -111,7 +179,7 @@ def visualize_sequence(directory_path, point_size=1.0):
         return
     
     # 상위 50개 파일만 선택 (170:220)
-    pcd_files = pcd_files[300:390]
+    pcd_files = pcd_files[170:220]
     print(f"총 {len(pcd_files)}개의 PCD 파일을 처리합니다.")
     
     # 시각화 윈도우 생성
@@ -197,7 +265,7 @@ def visualize_sequence(directory_path, point_size=1.0):
 def main():
     try:
         print("\n연속 프레임 시각화 시작...")
-        sequence_directory = "data/05_straight_duck_walk/pcd"
+        sequence_directory = "data/01_straight_walk/pcd"
         visualize_sequence(sequence_directory, point_size=1.0)
     except Exception as e:
         print(f"오류 발생: {e}")
