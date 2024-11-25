@@ -72,124 +72,75 @@ def adjust_grid_size(points, target_bin_count=50):
     return grid_size
 
 # 3. 높이 맵 계산 함수
-def calculate_height_map(points, x_bins, y_bins, threshold = 0.2):
+def calculate_height_map(points, x_bins, y_bins, threshold=0.2):
     print("[DEBUG] Calculating height map...")
+
+    # Step 1: Digitize indices for x and y
     x_indices = np.digitize(points[:, 0], bins=x_bins) - 1
     y_indices = np.digitize(points[:, 1], bins=y_bins) - 1
 
+    # Step 2: Create a mask for valid indices
     valid_mask = (x_indices >= 0) & (x_indices < len(x_bins) - 1) & \
                  (y_indices >= 0) & (y_indices < len(y_bins) - 1)
-    x_indices, y_indices, valid_points = x_indices[valid_mask], y_indices[valid_mask], points[valid_mask]
+    valid_points = points[valid_mask]
+    x_indices, y_indices = x_indices[valid_mask], y_indices[valid_mask]
 
     print(f"[DEBUG] Valid points count: {len(valid_points)}")
-    
-    # Step 1: Calculate initial height map
-    height_map = {}
-    for (x, y, z), i, j in zip(valid_points, x_indices, y_indices):
-        key = (i, j)
-        if key not in height_map:
-            height_map[key] = []
-        height_map[key].append(z)  # z 값만 추가
 
-    for key in height_map:
-        if len(height_map[key]) > 0:
-            sorted_z_values = np.sort(height_map[key])  # z 값 정렬
-            index_5th_percentile = max(0, int(len(sorted_z_values) * 0.05))  # 하위 5% 인덱스 계산
-            height_map[key] = sorted_z_values[index_5th_percentile]  # 하위 5% 값 설정
+    # Step 3: Calculate initial height map
+    height_map = {}
+    for (z, i, j) in zip(valid_points[:, 2], x_indices, y_indices):
+        key = (i, j)
+        if key in height_map:
+            height_map[key].append(z)
         else:
-            height_map[key] = None  # 빈 격자로 설정
+            height_map[key] = [z]
+
+    for key, z_values in height_map.items():
+        if z_values:
+            sorted_z_values = np.sort(z_values)
+            index_5th_percentile = max(0, int(len(sorted_z_values) * 0.05))
+            height_map[key] = sorted_z_values[index_5th_percentile]
+        else:
+            height_map[key] = None
 
     print(f"[DEBUG] Initial height map size: {len(height_map)}")
-    
-    # Step 2: Fill missing values using fill_empty_grids
-    def fill_empty_grids(height_map, x_bins, y_bins):
-        grid_keys = np.array(list(height_map.keys()))
-        grid_values = np.array([v for v in height_map.values() if v is not None])
-        print(f"[DEBUG] Number of height map entries before filling: {len(grid_keys)}")
-        grid_centers = [((x_bins[i] + x_bins[i + 1]) / 2, (y_bins[j] + y_bins[j + 1]) / 2) for i, j in grid_keys]
 
-        kdtree = cKDTree(grid_centers)
-        filled_map = {}
+    # Step 4: Post-processing based on neighbor differences
+    # Step 4.1: Build KDTree only for non-empty grid points
+    # Build grid keys and values
+    grid_keys = [key for key in height_map.keys() if height_map[key] is not None]  # 리스트로 유지
+    grid_values = np.array([height_map[key] for key in grid_keys])  # 값은 numpy 배열로 생성
 
-        for i in range(len(x_bins) - 1):
-            for j in range(len(y_bins) - 1):
-                key = (i, j)
-                if key in height_map and height_map[key] is not None:
-                    filled_map[key] = height_map[key]
-                else:
-                    # Find nearest neighbor for missing values
-                    center_x = (x_bins[i] + x_bins[i + 1]) / 2
-                    center_y = (y_bins[j] + y_bins[j + 1]) / 2
-                    _, idx = kdtree.query([center_x, center_y])
-                    filled_map[key] = grid_values[idx]
-
-        print(f"[DEBUG] Number of height map entries after filling: {len(filled_map)}")
-        return filled_map
-
-    height_map = fill_empty_grids(height_map, x_bins, y_bins)
-
-    print(f"[DEBUG] Height map size after filling missing values: {len(height_map)}")
-    
-    # Step 3: Post-processing based on neighbor differences
-    # processed_height_map = {}
-    # for (i, j), height in height_map.items():
-    #     # Collect neighbor heights
-    #     neighbors = [
-    #         height_map.get((i - 1, j)),  # left
-    #         height_map.get((i + 1, j)),  # right
-    #         height_map.get((i, j - 1)),  # bottom
-    #         height_map.get((i, j + 1))   # top
-    #     ]
-    #     # Remove None values from neighbors
-    #     neighbors = [h for h in neighbors if h is not None]
-
-    #     if neighbors:
-    #         # Calculate the maximum positive difference with neighbors
-    #         max_difference = max([height - neighbor for neighbor in neighbors])
-
-    #         # If the difference exceeds the threshold, replace with the smallest neighbor value
-    #         if max_difference > threshold:
-    #             smallest_neighbor = min(neighbors)
-    #             print(f"[DEBUG] Outlier detected at ({i}, {j}) with height {height} and max diff {max_difference}. Replacing with {smallest_neighbor}")
-    #             processed_height_map[(i, j)] = smallest_neighbor
-    #         else:
-    #             processed_height_map[(i, j)] = height
-    #     else:
-    #         # No neighbors, retain original height
-    #         processed_height_map[(i, j)] = height
-
-    # print(f"[DEBUG] Processed height map size: {len(processed_height_map)}")
-    # return processed_height_map
-    grid_keys = np.array(list(height_map.keys()))
-    grid_values = np.array([v for v in height_map.values() if v is not None])
+    # Precompute grid centers
     grid_centers = np.array([((x_bins[i] + x_bins[i + 1]) / 2, (y_bins[j] + y_bins[j + 1]) / 2) for i, j in grid_keys])
-
     kdtree = cKDTree(grid_centers)
 
-    # Step 3: Post-processing based on 2m neighbor differences
     processed_height_map = {}
+    search_radius = 1  # Define search radius for neighbor checks
+
     for (i, j), height in height_map.items():
         if height is None:
+            # Skip empty grids
             continue
 
-        # Current grid center
+        # Get the center of the current grid
         center_x = (x_bins[i] + x_bins[i + 1]) / 2
         center_y = (y_bins[j] + y_bins[j + 1]) / 2
-        center = np.array([center_x, center_y])
 
         # Find neighbors within the search radius
-        indices = kdtree.query_ball_point(center, r=1)
+        indices = kdtree.query_ball_point([center_x, center_y], r=search_radius)
         neighbor_heights = [grid_values[idx] for idx in indices if grid_values[idx] is not None]
 
+        # Process the height difference
         if neighbor_heights:
             smallest_neighbor = min(neighbor_heights)
             if abs(height - smallest_neighbor) > threshold:
-                print(f"[DEBUG] Outlier detected at ({i}, {j}) with height {height} and replaced with {smallest_neighbor}")
                 processed_height_map[(i, j)] = smallest_neighbor
             else:
                 processed_height_map[(i, j)] = height
         else:
-            processed_height_map[(i, j)] = height
+            processed_height_map[(i, j)] = height  # Leave unchanged if no neighbors found
 
     print(f"[DEBUG] Processed height map size: {len(processed_height_map)}")
     return processed_height_map
@@ -209,19 +160,20 @@ def visualize_point_clouds(pcd_list, window_name="ROR Visualization", point_size
     vis.destroy_window()
 
 # 메인 실행 코드
-#file_path = "data/05_straight_duck_walk/pcd/pcd_000370.pcd"
-file_path = "data/01_straight_walk/pcd/pcd_000100.pcd"
+file_path = "data/05_straight_duck_walk/pcd/pcd_000370.pcd"
+#file_path = "data/01_straight_walk/pcd/pcd_000100.pcd"
+#file_path = "data/04_zigzag_walk/pcd/pcd_000300.pcd"
 original_pcd = o3d.io.read_point_cloud(file_path)
 print(f"[DEBUG] Original point cloud size: {len(original_pcd.points)}")
 print("[INFO] Visualizing original point cloud...")
-visualize_point_clouds(original_pcd, window_name="Original Point Cloud", point_size=2.0)
+# visualize_point_clouds(original_pcd, window_name="Original Point Cloud", point_size=2.0)
 
 # Voxel Downsampling
-voxel_size = 0.01
+voxel_size = 0.05
 downsample_pcd = original_pcd.voxel_down_sample(voxel_size=voxel_size)
 print(f"[DEBUG] Downsampled point cloud size: {len(downsample_pcd.points)}")
 print("[INFO] Visualizing downsampled point cloud...")
-visualize_point_clouds(downsample_pcd, window_name="Downsampled Point Cloud", point_size=2.0)
+# visualize_point_clouds(downsample_pcd, window_name="Downsampled Point Cloud", point_size=2.0)
 
 # Radius Outlier Removal (ROR)
 cl, ind = downsample_pcd.remove_radius_outlier(nb_points=6, radius=1.2)
@@ -234,8 +186,8 @@ ror_outliers_pcd = downsample_pcd.select_by_index(ind, invert=True)
 ror_outliers_pcd.paint_uniform_color([1, 0, 0])  # 빨간색 (제거된 점)
 
 # ROR 시각화
-visualize_point_clouds([ror_inliers_pcd, ror_outliers_pcd], 
-                       window_name="ROR Visualization: Inliers (Green) & Outliers (Red)", point_size=2.0)
+# visualize_point_clouds([ror_inliers_pcd, ror_outliers_pcd], 
+#                       window_name="ROR Visualization: Inliers (Green) & Outliers (Red)", point_size=2.0)
 
 ror_pcd = downsample_pcd.select_by_index(ind)
 print(f"[DEBUG] Point cloud size after ROR: {len(ror_pcd.points)}")
@@ -267,7 +219,7 @@ print(f"[DEBUG] Number of x_bins: {len(x_bins)}, Number of y_bins: {len(y_bins)}
 height_map = calculate_height_map(transformed_points, x_bins, y_bins, threshold = 0.05) # threshold : 주변 격자와의 높이차 
 
 # 비바닥 점 필터링
-threshold = 0.2 # threshold : 격자의 바닥 높이와의 차
+threshold = 0.15 # threshold : 격자의 바닥 높이와의 차
 non_floor_indices = []
 # for idx, (x, y, z) in enumerate(projected_points):
 for idx, (x, y, z) in enumerate(transformed_points):
@@ -292,8 +244,8 @@ projected_pcd.points = o3d.utility.Vector3dVector(transformed_points)
 # 비바닥 및 바닥 포인트
 non_floor_pcd = ror_inliers_pcd.select_by_index(non_floor_indices)
 floor_pcd = ror_inliers_pcd.select_by_index(non_floor_indices, invert=True)
-road_pcd = ror_inliers_pcd.select_by_index(inliers)
-non_road_pcd = ror_inliers_pcd.select_by_index(inliers, invert=True)
+# road_pcd = ror_inliers_pcd.select_by_index(inliers)
+# non_road_pcd = ror_inliers_pcd.select_by_index(inliers, invert=True)
 
 # 비바닥 점 (non-floor) 개수
 num_non_floor_points = len(non_floor_pcd.points)
@@ -303,24 +255,24 @@ print(f"Number of non-floor points: {num_non_floor_points}")
 num_floor_points = len(floor_pcd.points)
 print(f"Number of floor points: {num_floor_points}")
 
-# 도로 점 (road) 개수
-num_road_points = len(road_pcd.points)
-print(f"Number of road points: {num_road_points}")
+# # 도로 점 (road) 개수
+# num_road_points = len(road_pcd.points)
+# print(f"Number of road points: {num_road_points}")
 
-# 도로 아닌 점 (non-road) 개수
-num_non_road_points = len(non_road_pcd.points)
-print(f"Number of non-road points: {num_non_road_points}")
+# # 도로 아닌 점 (non-road) 개수
+# num_non_road_points = len(non_road_pcd.points)
+# print(f"Number of non-road points: {num_non_road_points}")
 
 # 색상 설정
 floor_pcd.paint_uniform_color([1, 0, 0])  # 빨간색
 non_floor_pcd.paint_uniform_color([0, 1, 0])  # 녹색
 
-road_pcd.paint_uniform_color([1, 0, 0])  # 빨간색
-non_road_pcd.paint_uniform_color([0, 1, 0])  # 녹색
+# road_pcd.paint_uniform_color([1, 0, 0])  # 빨간색
+# non_road_pcd.paint_uniform_color([0, 1, 0])  # 녹색
 
 # 시각화
 # visualize_point_clouds([road_pcd, non_road_pcd], 
 #                        window_name="Road (Red) and Non-Road (Green) Points", point_size=2.0)
 
 visualize_point_clouds([floor_pcd, non_floor_pcd], 
-                       window_name="Floor (Red) and Non-Floor (Green) Points", point_size=2.0)
+                       window_name="Floor (Red) and Non-Floor (Green) Points", point_size=1.0)
