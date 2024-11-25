@@ -97,33 +97,36 @@ def calculate_height_map(points, x_bins, y_bins, threshold = 0.2):
             index_5th_percentile = max(0, int(len(sorted_z_values) * 0.05))  # 하위 5% 인덱스 계산
             height_map[key] = sorted_z_values[index_5th_percentile]  # 하위 5% 값 설정
         else:
-            height_map[key] = 0  # 기본값 설정 (빈 리스트일 경우)
+            height_map[key] = None  # 빈 격자로 설정
 
     print(f"[DEBUG] Initial height map size: {len(height_map)}")
     
-    # Step 2: Fill missing values (set useful defaults)
-    def fill_missing_height(key, height_map):
-        i, j = key
-        neighbors = [
-            height_map.get((i - 1, j)),  # left
-            height_map.get((i + 1, j)),  # right
-            height_map.get((i, j - 1)),  # bottom
-            height_map.get((i, j + 1))   # top
-        ]
-        # Remove None values from neighbors
-        neighbors = [h for h in neighbors if h is not None]
+    # Step 2: Fill missing values using fill_empty_grids
+    def fill_empty_grids(height_map, x_bins, y_bins):
+        grid_keys = np.array(list(height_map.keys()))
+        grid_values = np.array([v for v in height_map.values() if v is not None])
+        print(f"[DEBUG] Number of height map entries before filling: {len(grid_keys)}")
+        grid_centers = [((x_bins[i] + x_bins[i + 1]) / 2, (y_bins[j] + y_bins[j + 1]) / 2) for i, j in grid_keys]
 
-        if neighbors:
-            # Use the average of neighbors as the default value
-            return np.mean(neighbors)
-        else:
-            # If no neighbors, use a global minimum or average height
-            global_min_height = min(h for h in height_map.values() if h is not None)
-            return global_min_height
+        kdtree = cKDTree(grid_centers)
+        filled_map = {}
 
-    for key in height_map:
-        if height_map[key] is None:
-            height_map[key] = fill_missing_height(key, height_map)
+        for i in range(len(x_bins) - 1):
+            for j in range(len(y_bins) - 1):
+                key = (i, j)
+                if key in height_map and height_map[key] is not None:
+                    filled_map[key] = height_map[key]
+                else:
+                    # Find nearest neighbor for missing values
+                    center_x = (x_bins[i] + x_bins[i + 1]) / 2
+                    center_y = (y_bins[j] + y_bins[j + 1]) / 2
+                    _, idx = kdtree.query([center_x, center_y])
+                    filled_map[key] = grid_values[idx]
+
+        print(f"[DEBUG] Number of height map entries after filling: {len(filled_map)}")
+        return filled_map
+
+    height_map = fill_empty_grids(height_map, x_bins, y_bins)
 
     print(f"[DEBUG] Height map size after filling missing values: {len(height_map)}")
     
@@ -158,30 +161,7 @@ def calculate_height_map(points, x_bins, y_bins, threshold = 0.2):
     print(f"[DEBUG] Processed height map size: {len(processed_height_map)}")
     return processed_height_map
 
-# 4. 빈 격자 보완 함수
-def fill_empty_grids(height_map, x_bins, y_bins):
-    print("[DEBUG] Filling empty grids...")
-    grid_keys = np.array(list(height_map.keys()))
-    grid_values = np.array(list(height_map.values()))
-    print(f"[DEBUG] Number of height map entries before filling: {len(grid_keys)}")
-    grid_centers = [((x_bins[i] + x_bins[i + 1]) / 2, (y_bins[j] + y_bins[j + 1]) / 2) for i, j in grid_keys]
-
-    kdtree = cKDTree(grid_centers)
-    filled_map = {}
-
-    for i in range(len(x_bins) - 1):
-        for j in range(len(y_bins) - 1):
-            key = (i, j)
-            if key in height_map:
-                filled_map[key] = height_map[key]
-            else:
-                _, idx = kdtree.query([(x_bins[i] + x_bins[i + 1]) / 2, (y_bins[j] + y_bins[j + 1]) / 2])
-                filled_map[key] = grid_values[idx]
-
-    print(f"[DEBUG] Number of height map entries after filling: {len(filled_map)}")
-    return filled_map
-
-# 5. 시각화 함수
+# 4. 시각화 함수
 def visualize_point_clouds(pcd_list, window_name="ROR Visualization", point_size=1.0):
     # 단일 객체를 리스트로 변환
     if isinstance(pcd_list, o3d.geometry.PointCloud):
@@ -251,9 +231,7 @@ y_bins = np.arange(y_min, y_max, grid_resolution)
 print(f"[DEBUG] Number of x_bins: {len(x_bins)}, Number of y_bins: {len(y_bins)}")
 
 # 높이 맵 계산 및 보완
-# height_map = calculate_height_map(projected_points, x_bins, y_bins)
 height_map = calculate_height_map(transformed_points, x_bins, y_bins, threshold = 0.05) # threshold : 주변 격자와의 높이차 
-height_map = fill_empty_grids(height_map, x_bins, y_bins)
 
 # 비바닥 점 필터링
 threshold = 0.1 # threshold : 
@@ -268,14 +246,10 @@ for idx, (x, y, z) in enumerate(transformed_points):
             non_floor_indices.append(idx)
 print(f"[DEBUG] Total non-floor points: {len(non_floor_indices)}")
 
-# print(non_floor_indices)
-
 # Floor points count
 # floor_indices = set(range(len(projected_points))) - set(non_floor_indices)
 floor_indices = set(range(len(transformed_points))) - set(non_floor_indices)
 print(f"[DEBUG] Total floor points: {len(floor_indices)}")
-
-# print(floor_indices)
 
 # Open3D 객체 변환
 projected_pcd = o3d.geometry.PointCloud()
