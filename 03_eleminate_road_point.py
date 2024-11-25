@@ -72,7 +72,7 @@ def adjust_grid_size(points, target_bin_count=50):
     return grid_size
 
 # 3. 높이 맵 계산 함수
-def calculate_height_map(points, x_bins, y_bins):
+def calculate_height_map(points, x_bins, y_bins, threshold = 0.2):
     print("[DEBUG] Calculating height map...")
     x_indices = np.digitize(points[:, 0], bins=x_bins) - 1
     y_indices = np.digitize(points[:, 1], bins=y_bins) - 1
@@ -83,6 +83,7 @@ def calculate_height_map(points, x_bins, y_bins):
 
     print(f"[DEBUG] Valid points count: {len(valid_points)}")
     
+    # Step 1: Calculate initial height map
     height_map = {}
     for (x, y, z), i, j in zip(valid_points, x_indices, y_indices):
         key = (i, j)
@@ -92,12 +93,70 @@ def calculate_height_map(points, x_bins, y_bins):
 
     for key in height_map:
         if len(height_map[key]) > 0:
-            height_map[key] = np.median(height_map[key])  # 중앙값 계산
+            sorted_z_values = np.sort(height_map[key])  # z 값 정렬
+            index_5th_percentile = max(0, int(len(sorted_z_values) * 0.05))  # 하위 5% 인덱스 계산
+            height_map[key] = sorted_z_values[index_5th_percentile]  # 하위 5% 값 설정
         else:
             height_map[key] = 0  # 기본값 설정 (빈 리스트일 경우)
 
-    print(f"[DEBUG] Height map size: {len(height_map)}")
-    return height_map
+    print(f"[DEBUG] Initial height map size: {len(height_map)}")
+    
+    # Step 2: Fill missing values (set useful defaults)
+    def fill_missing_height(key, height_map):
+        i, j = key
+        neighbors = [
+            height_map.get((i - 1, j)),  # left
+            height_map.get((i + 1, j)),  # right
+            height_map.get((i, j - 1)),  # bottom
+            height_map.get((i, j + 1))   # top
+        ]
+        # Remove None values from neighbors
+        neighbors = [h for h in neighbors if h is not None]
+
+        if neighbors:
+            # Use the average of neighbors as the default value
+            return np.mean(neighbors)
+        else:
+            # If no neighbors, use a global minimum or average height
+            global_min_height = min(h for h in height_map.values() if h is not None)
+            return global_min_height
+
+    for key in height_map:
+        if height_map[key] is None:
+            height_map[key] = fill_missing_height(key, height_map)
+
+    print(f"[DEBUG] Height map size after filling missing values: {len(height_map)}")
+    
+    # Step 3: Post-processing based on neighbor differences
+    processed_height_map = {}
+    for (i, j), height in height_map.items():
+        # Collect neighbor heights
+        neighbors = [
+            height_map.get((i - 1, j)),  # left
+            height_map.get((i + 1, j)),  # right
+            height_map.get((i, j - 1)),  # bottom
+            height_map.get((i, j + 1))   # top
+        ]
+        # Remove None values from neighbors
+        neighbors = [h for h in neighbors if h is not None]
+
+        if neighbors:
+            # Calculate the maximum positive difference with neighbors
+            max_difference = max([height - neighbor for neighbor in neighbors])
+
+            # If the difference exceeds the threshold, replace with the smallest neighbor value
+            if max_difference > threshold:
+                smallest_neighbor = min(neighbors)
+                print(f"[DEBUG] Outlier detected at ({i}, {j}) with height {height} and max diff {max_difference}. Replacing with {smallest_neighbor}")
+                processed_height_map[(i, j)] = smallest_neighbor
+            else:
+                processed_height_map[(i, j)] = height
+        else:
+            # No neighbors, retain original height
+            processed_height_map[(i, j)] = height
+
+    print(f"[DEBUG] Processed height map size: {len(processed_height_map)}")
+    return processed_height_map
 
 # 4. 빈 격자 보완 함수
 def fill_empty_grids(height_map, x_bins, y_bins):
@@ -137,8 +196,8 @@ def visualize_point_clouds(pcd_list, window_name="ROR Visualization", point_size
     vis.destroy_window()
 
 # 메인 실행 코드
-#file_path = "data/05_straight_duck_walk/pcd/pcd_000370.pcd"
-file_path = "data/01_straight_walk/pcd/pcd_000100.pcd"
+file_path = "data/05_straight_duck_walk/pcd/pcd_000370.pcd"
+#file_path = "data/01_straight_walk/pcd/pcd_000100.pcd"
 original_pcd = o3d.io.read_point_cloud(file_path)
 print(f"[DEBUG] Original point cloud size: {len(original_pcd.points)}")
 print("[INFO] Visualizing original point cloud...")
@@ -179,7 +238,7 @@ transformed_points = transform_to_plane_based_coordinates(ror_points, a, b, c, d
 
 # 격자 생성
 # grid_resolution = adjust_grid_size(projected_points, target_bin_count=50)
-grid_resolution = adjust_grid_size(transformed_points, target_bin_count=50)
+#grid_resolution = adjust_grid_size(transformed_points, target_bin_count=50)
 grid_resolution = 0.3
 
 # x_min, y_min = np.min(projected_points[:, :2], axis=0)
@@ -193,11 +252,11 @@ print(f"[DEBUG] Number of x_bins: {len(x_bins)}, Number of y_bins: {len(y_bins)}
 
 # 높이 맵 계산 및 보완
 # height_map = calculate_height_map(projected_points, x_bins, y_bins)
-height_map = calculate_height_map(transformed_points, x_bins, y_bins)
+height_map = calculate_height_map(transformed_points, x_bins, y_bins, threshold = 0.05) # threshold : 주변 격자와의 높이차 
 height_map = fill_empty_grids(height_map, x_bins, y_bins)
 
 # 비바닥 점 필터링
-threshold = 0.2
+threshold = 0.1 # threshold : 
 non_floor_indices = []
 # for idx, (x, y, z) in enumerate(projected_points):
 for idx, (x, y, z) in enumerate(transformed_points):
