@@ -4,6 +4,37 @@ from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
 #from scipy.spatial import cKDTree
 
+class GridDatabase:
+    def __init__(self):
+        self.data = {}  # 격자 데이터 저장 (격자 키 -> PCA/밀도 정보 및 변화 기록)
+
+    def update(self, grid_key, pca_values, density, frame_index):
+        if grid_key not in self.data:
+            self.data[grid_key] = {
+                "pca": pca_values,
+                "density": density,
+                "last_updated": frame_index,
+                "unchanged_frames": 0
+            }
+        else:
+            self.data[grid_key]["pca"] = pca_values
+            self.data[grid_key]["density"] = density
+            self.data[grid_key]["last_updated"] = frame_index
+            self.data[grid_key]["unchanged_frames"] = 0
+
+    def mark_unchanged(self):
+        for key in self.data:
+            self.data[key]["unchanged_frames"] += 1
+
+    def clean_old_entries(self, threshold=3):
+        self.data = {k: v for k, v in self.data.items() if v["unchanged_frames"] < threshold}
+
+    def get_pca_density(self, grid_key):
+        return self.data[grid_key]["pca"], self.data[grid_key]["density"] if grid_key in self.data else (None, None)
+
+    def get_all_keys(self):
+        return list(self.data.keys())
+
 # 1. 밀도 계산 함수
 def compute_density(points, k=5):
     if len(points) < k:
@@ -19,7 +50,52 @@ def compute_pca(points):
     explained_variance_ratio = pca.explained_variance_ratio_
     return explained_variance_ratio
 
-# 격자 내 포인트 PCA와 밀도 계산 함수
+# 첫 프레임에서 클러스터가 포함된 격자점의 PCA와 밀도 계산 함수
+def calculate_cluster_grid_pca_and_density(clusters, x_bins, y_bins):
+    grid_pca = {}
+    grid_density = {}
+
+    for cluster in clusters:
+        cluster_points = np.asarray(cluster.points)
+        x_indices = np.digitize(cluster_points[:, 0], bins=x_bins) - 1
+        y_indices = np.digitize(cluster_points[:, 1], bins=y_bins) - 1
+
+        for i, (x_idx, y_idx) in enumerate(zip(x_indices, y_indices)):
+            if x_idx < 0 or y_idx < 0 or x_idx >= len(x_bins) - 1 or y_idx >= len(y_bins) - 1:
+                continue
+
+            key = (x_idx, y_idx)
+            if key not in grid_pca:
+                grid_pca[key] = []
+                grid_density[key] = []
+
+            grid_pca[key].append(cluster_points[i])
+            grid_density[key].append(cluster_points[i])
+
+    # PCA와 밀도 계산
+    for key in list(grid_pca.keys()):
+        grid_points = np.array(grid_pca[key])
+
+        # PCA 계산
+        if len(grid_points) >= 3:
+            pca = PCA(n_components=3)
+            pca.fit(grid_points)
+            grid_pca[key] = pca.explained_variance_ratio_
+        else:
+            grid_pca[key] = [0, 0, 0]
+
+        # 밀도 계산
+        density_points = np.array(grid_density[key])
+        if len(density_points) >= 5:
+            nbrs = NearestNeighbors(n_neighbors=5).fit(density_points)
+            distances, _ = nbrs.kneighbors(density_points)
+            grid_density[key] = 1 / distances.mean(axis=1).mean()
+        else:
+            grid_density[key] = 0
+
+    return grid_pca, grid_density
+
+# 격자 PCA와 밀도 계산 함수
 def calculate_grid_pca_and_density(points, x_bins, y_bins):
     x_indices = np.digitize(points[:, 0], bins=x_bins) - 1
     y_indices = np.digitize(points[:, 1], bins=y_bins) - 1
@@ -44,50 +120,45 @@ def calculate_grid_pca_and_density(points, x_bins, y_bins):
         grid_points = np.array(grid_pca[key])
 
         # PCA 계산
-        if len(grid_points) >= 3:  # 최소 3개의 점이 필요
-            grid_pca[key] = compute_pca(grid_points)
+        if len(grid_points) >= 3:
+            pca = PCA(n_components=3)
+            pca.fit(grid_points)
+            grid_pca[key] = pca.explained_variance_ratio_
         else:
-            grid_pca[key] = [0, 0, 0]  # 기본값 설정
+            grid_pca[key] = [0, 0, 0]
 
         # 밀도 계산
         density_points = np.array(grid_density[key])
-        grid_density[key] = compute_density(density_points, k=5).mean() if len(density_points) >= 5 else 0
+        if len(density_points) >= 5:
+            nbrs = NearestNeighbors(n_neighbors=5).fit(density_points)
+            distances, _ = nbrs.kneighbors(density_points)
+            grid_density[key] = 1 / distances.mean(axis=1).mean()
+        else:
+            grid_density[key] = 0
 
     return grid_pca, grid_density
 
-# 격자의 중심 좌표를 계산하는 함수
-def get_grid_center(x_idx, y_idx, x_bins, y_bins):
-    x_center = (x_bins[x_idx] + x_bins[x_idx + 1]) / 2
-    y_center = (y_bins[y_idx] + y_bins[y_idx + 1]) / 2
-    return np.array([x_center, y_center])
-
-# 격자 간 변화 탐지 함수 (2m 거리 제한 추가)
-def detect_grid_changes(prev_grid_pca, prev_grid_density, curr_grid_pca, curr_grid_density, 
-                        x_bins, y_bins, pca_threshold=0.3, density_threshold=10, distance_threshold=2.0):
+# 격자점 변화 감지 함수
+def detect_changes(database, current_pca, current_density, frame_index, pca_threshold=0.3, density_threshold=10):
     changed_grids = []
 
-    for key in curr_grid_pca.keys():
-        if key in prev_grid_pca:
-            # PCA 및 밀도 변화 계산
-            pca_change = np.linalg.norm(np.array(curr_grid_pca[key]) - np.array(prev_grid_pca[key]))
-            density_change = abs(curr_grid_density[key] - prev_grid_density[key])
-            
-            # 중심 좌표 간 거리 계산
-            curr_center = get_grid_center(key[0], key[1], x_bins, y_bins)
-            prev_center = get_grid_center(key[0], key[1], x_bins, y_bins)  # 이전 격자와 동일 키
-            
-            # 조건 충족 여부 확인
+    for grid_key, data in database.data.items():
+        prev_pca = data["pca"]
+        prev_density = data["density"]
+
+        if grid_key in current_pca:
+            pca_change = np.linalg.norm(np.array(current_pca[grid_key]) - np.array(prev_pca))
+            density_change = abs(current_density[grid_key] - prev_density)
+
             if pca_change > pca_threshold or density_change > density_threshold:
-                if np.linalg.norm(curr_center - prev_center) <= distance_threshold:
-                    changed_grids.append(key)
-        else:
-            # 새로운 격자로 간주 (거리에 대한 조건 제외)
-            changed_grids.append(key)
+                changed_grids.append(grid_key)
+                database.update(grid_key, current_pca[grid_key], current_density[grid_key], frame_index)
 
     return changed_grids
 
-# Bounding Box 생성 함수 (포인트 개수 조건 및 2m 크기 제한 추가)
-def create_bounding_boxes_for_changed_grids(points, labels, changed_grids, x_bins, y_bins):
+
+# 바운딩 박스 생성 함수
+def create_bounding_boxes(points, labels, changed_grids, x_bins, y_bins):
     bounding_boxes = []
 
     for grid_key in changed_grids:
@@ -103,25 +174,15 @@ def create_bounding_boxes_for_changed_grids(points, labels, changed_grids, x_bin
         cluster_indices = set(labels[grid_indices])
         for cluster_id in cluster_indices:
             if cluster_id == -1:
-                continue  # 노이즈 제외
-            
-            # 클러스터에 속한 포인트 추출
+                continue
+
             cluster_points = points[labels == cluster_id]
-
-            # 클러스터의 포인트 개수 조건 확인
-            if len(cluster_points) < 100:
-                continue  # 포인트 개수가 70개 미만이면 건너뜀
-
             cluster_pcd = o3d.geometry.PointCloud()
             cluster_pcd.points = o3d.utility.Vector3dVector(cluster_points)
 
             bbox = cluster_pcd.get_axis_aligned_bounding_box()
-            
-            # 바운딩 박스 크기 계산
-            box_size = bbox.get_extent()  # [가로(x), 세로(y), 높이(z)]
-            if all(dim <= 2.0 for dim in box_size):  # 모든 크기가 2m 이내인지 확인
-                bbox.color = [1, 0, 0]  # 빨간색
-                bounding_boxes.append(bbox)
+            bbox.color = [1, 0, 0]
+            bounding_boxes.append(bbox)
 
     return bounding_boxes
 
@@ -171,10 +232,22 @@ def cluster_non_floor_points(non_floor_pcd, eps=0.5, min_points=10):
     return clusters, labels
 
 # Bounding Box와 Point Cloud를 함께 시각화
-def visualize_with_bounding_boxes(pcd_list, bounding_boxes, window_name="Clusters with Bounding Boxes", point_size=1.0):
+def visualize_with_bounding_boxes(pcd_list, bounding_boxes, labels, window_name="Clusters with Bounding Boxes", point_size=1.0):
     vis = o3d.visualization.Visualizer()
     vis.create_window(window_name=window_name)
     
+    # 클러스터에 고유 색상 적용
+    if labels is not None and len(labels) > 0:
+        max_label = labels.max()
+        cluster_colors = np.random.rand(max_label + 1, 3)  # 각 클러스터에 고유 색상 생성
+        colors = np.zeros((len(labels), 3))  # 포인트 수 만큼 색상 초기화
+        for i in range(len(labels)):
+            if labels[i] != -1:  # 노이즈는 색상을 설정하지 않음
+                colors[i] = cluster_colors[labels[i]]
+        
+        for pcd in pcd_list:
+            pcd.colors = o3d.utility.Vector3dVector(colors)  # 클러스터 색상 적용
+
     # 클러스터 추가
     for pcd in pcd_list:
         vis.add_geometry(pcd)
@@ -203,14 +276,25 @@ def visualize_point_clouds(pcd_list, window_name="Clusters Visualization", point
 # 메인 실행 코드
 if __name__ == "__main__":
     file_paths = [
-        "data/03_straight_crawl/pcd/pcd_000267.pcd",
-        "data/03_straight_crawl/pcd/pcd_000268.pcd",
-        "data/03_straight_crawl/pcd/pcd_000269.pcd",
-        "data/03_straight_crawl/pcd/pcd_000270.pcd",
-        "data/03_straight_crawl/pcd/pcd_000271.pcd"
+        "data/04_zigzag_walk/pcd/pcd_000267.pcd",
+        "data/04_zigzag_walk/pcd/pcd_000268.pcd",
+        "data/04_zigzag_walk/pcd/pcd_000269.pcd",
+        "data/04_zigzag_walk/pcd/pcd_000270.pcd",
+        "data/04_zigzag_walk/pcd/pcd_000271.pcd",
+        "data/04_zigzag_walk/pcd/pcd_000272.pcd",
+        "data/04_zigzag_walk/pcd/pcd_000273.pcd",
+        "data/04_zigzag_walk/pcd/pcd_000274.pcd",
+        "data/04_zigzag_walk/pcd/pcd_000275.pcd",
+        "data/04_zigzag_walk/pcd/pcd_000276.pcd",
+        "data/04_zigzag_walk/pcd/pcd_000277.pcd",
+        "data/04_zigzag_walk/pcd/pcd_000278.pcd",
+        "data/04_zigzag_walk/pcd/pcd_000279.pcd",
+        "data/04_zigzag_walk/pcd/pcd_000280.pcd",
+        "data/04_zigzag_walk/pcd/pcd_000281.pcd",
+        "data/04_zigzag_walk/pcd/pcd_000282.pcd",
+        "data/04_zigzag_walk/pcd/pcd_000283.pcd",
     ]
-    previous_grid_pca = None
-    previous_grid_density = None
+    grid_db = GridDatabase()
     
     for frame_idx, file_path in enumerate(file_paths):
         print(f"[DEBUG] Processing frame {frame_idx}: {file_path}")
@@ -243,44 +327,56 @@ if __name__ == "__main__":
         height_map = calculate_height_map(transformed_points, x_bins, y_bins, threshold=0.05)
         
         # 비바닥 포인트 추출
+        threshold = 0.15 # threshold : 격자의 바닥 높이와의 차
         non_floor_indices = []
         for idx, (x, y, z) in enumerate(transformed_points):
             x_idx = np.searchsorted(x_bins, x, side='right') - 1
             y_idx = np.searchsorted(y_bins, y, side='right') - 1
             if 0 <= x_idx < len(x_bins) - 1 and 0 <= y_idx < len(y_bins) - 1:
                 smoothed_height = height_map.get((x_idx, y_idx), None)
-                if smoothed_height is not None and abs(z - smoothed_height) > 0.15:
+                if smoothed_height is not None and abs(z - smoothed_height) > threshold:
                     non_floor_indices.append(idx)
         
         non_floor_pcd = filtered_pcd.select_by_index(non_floor_indices)
+        non_floor_points = np.asarray(non_floor_pcd.points)  # numpy 배열로 변환
         
         # 클러스터링
-        labels = np.array(non_floor_pcd.cluster_dbscan(eps=0.3, min_points=10, print_progress=True))
-        
-        # 격자 내 PCA와 밀도 계산
-        current_grid_pca, current_grid_density = calculate_grid_pca_and_density(
-            np.asarray(non_floor_pcd.points), x_bins, y_bins
-        )
-        
-        # 변화 감지 (2m 거리 필터 포함)
-        changed_grids = []
-        if previous_grid_pca is not None:
-            changed_grids = detect_grid_changes(
-                previous_grid_pca, previous_grid_density,
-                current_grid_pca, current_grid_density,
-                x_bins, y_bins,
-                pca_threshold=0.3, density_threshold=10, distance_threshold=2.0
-            )
-            print(f"[DEBUG] Changed grids in frame {frame_idx}: {changed_grids}")
+        labels = np.array(non_floor_pcd.cluster_dbscan(eps=0.2, min_points=10, print_progress=True))    #### 파라미터 조정 필요
+        unique_labels = np.unique(labels)
+        clusters = [non_floor_pcd.select_by_index(np.where(labels == cluster_id)[0]) for cluster_id in unique_labels if cluster_id != -1]
 
-        # Bounding Box 생성
-        bounding_boxes = create_bounding_boxes_for_changed_grids(
-            np.asarray(non_floor_pcd.points), labels, changed_grids, x_bins, y_bins
+        # 첫 프레임 처리
+        if frame_idx == 0:
+            print("[DEBUG] Processing first frame for initial cluster grid analysis.")
+            pca, density = calculate_cluster_grid_pca_and_density(clusters, x_bins, y_bins)
+            for key in pca:
+                grid_db.update(key, pca[key], density[key], frame_idx)
+                
+            # 데이터베이스 상태 출력
+            print(f"[INFO] Number of grid points in database after frame {frame_idx}: {len(grid_db.get_all_keys())}")
+            continue
+
+        # 현재 프레임 격자 PCA 및 밀도 계산
+        current_pca, current_density = calculate_grid_pca_and_density(non_floor_points, x_bins, y_bins)
+
+        # 변화 감지
+        changed_grids = detect_changes(grid_db, current_pca, current_density, frame_idx)
+        print(f"[DEBUG] Changed grids: {changed_grids}")
+
+        # 바운딩 박스 생성
+        bounding_boxes = create_bounding_boxes(non_floor_points, labels, changed_grids, x_bins, y_bins)
+
+        # 데이터베이스 갱신 및 삭제
+        grid_db.mark_unchanged()
+        grid_db.clean_old_entries()
+        
+        # 데이터베이스 상태 출력
+        print(f"[INFO] Number of grid points in database after frame {frame_idx}: {len(grid_db.get_all_keys())}")
+        
+        # 최종 시각화 호출 부분
+        visualize_with_bounding_boxes(
+            [non_floor_pcd], 
+            bounding_boxes, 
+            labels, 
+            window_name=f"Frame {frame_idx} with Bounding Boxes"
         )
-        
-        # 시각화
-        visualize_with_bounding_boxes([non_floor_pcd], bounding_boxes, window_name=f"Frame {frame_idx} with Bounding Boxes")
-        
-        # 다음 프레임 준비
-        previous_grid_pca = current_grid_pca
-        previous_grid_density = current_grid_density
