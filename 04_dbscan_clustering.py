@@ -157,7 +157,7 @@ def visualize_point_clouds(pcd_list, window_name="ROR Visualization", point_size
 # 메인 실행 코드
 # file_path = "data/05_straight_duck_walk/pcd/pcd_000370.pcd"
 # file_path = "data/01_straight_walk/pcd/pcd_000250.pcd"
-file_path = "data/04_zigzag_walk/pcd/pcd_000250.pcd"
+file_path = "data/04_zigzag_walk/pcd/pcd_000267.pcd"
 # file_path = "data/06_straight_crawl/pcd/pcd_000500.pcd"
 # file_path = "data/02_straight_duck_walk/pcd/pcd_000500.pcd"
 # file_path = "data/03_straight_crawl/pcd/pcd_000900.pcd"
