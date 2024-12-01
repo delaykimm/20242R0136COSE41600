@@ -200,11 +200,9 @@ def visualize_sequence(non_floor_points_db: Dict[str, np.ndarray],
                       moving_clusters_db: Dict[str, np.ndarray],
                       delay: float = 0.1):
     """
-    포인트 클라우드 시퀀스를 시각화합니다.
-    회색: 정적 점들
-    빨간색: 점 단위 이동 검출
-    초록색: 클러스터 단위 이동 검출
+    최적화된 포인트 클라우드 시각화 함수
     """
+    # 1. 초기 설정
     vis = o3d.visualization.Visualizer()
     vis.create_window("Moving Points Detection", width=1024, height=768)
     
@@ -212,9 +210,15 @@ def visualize_sequence(non_floor_points_db: Dict[str, np.ndarray],
     opt.background_color = np.asarray([0, 0, 0])
     opt.point_size = 2.0
     
+    # 포인트 클라우드 객체 생성
     static_pcd = o3d.geometry.PointCloud()
     point_moving_pcd = o3d.geometry.PointCloud()
     cluster_moving_pcd = o3d.geometry.PointCloud()
+    
+    # 색상 설정
+    static_color = np.array([0.7, 0.7, 0.7])      # 회색
+    point_moving_color = np.array([1, 0, 0])      # 빨간색
+    cluster_moving_color = np.array([0, 1, 0])    # 초록색
     
     vis.add_geometry(static_pcd)
     vis.add_geometry(point_moving_pcd)
@@ -229,44 +233,65 @@ def visualize_sequence(non_floor_points_db: Dict[str, np.ndarray],
             point_moving = moving_points_db[file_name]
             cluster_moving = moving_clusters_db[file_name]
             
-            # 정적 점들 분리
-            moving_mask = np.ones(len(current_points), dtype=bool)
-            for point in point_moving:
-                distances = np.linalg.norm(current_points - point, axis=1)
-                moving_mask &= (distances > 0.3)
-            for point in cluster_moving:
-                distances = np.linalg.norm(current_points - point, axis=1)
-                moving_mask &= (distances > 0.3)
-            static_points = current_points[moving_mask]
+            # 정적 점 분리
+            if len(point_moving) > 0 or len(cluster_moving) > 0:
+                # 이동 점들 결합
+                moving_points = np.vstack([point_moving, cluster_moving]) if len(point_moving) > 0 and len(cluster_moving) > 0 else \
+                              point_moving if len(point_moving) > 0 else cluster_moving
+                
+                # KDTree 생성
+                moving_pcd = o3d.geometry.PointCloud()
+                moving_pcd.points = o3d.utility.Vector3dVector(moving_points)
+                tree = o3d.geometry.KDTreeFlann(moving_pcd)
+                
+                # 정적 점 마스크 생성
+                static_mask = np.ones(len(current_points), dtype=bool)
+                
+                # 각 점에 대해 가장 가까운 이동 점과의 거리 계산
+                for i in range(len(current_points)):
+                    _, _, dist = tree.search_knn_vector_3d(current_points[i], 1)
+                    if np.asarray(dist)[0] < 0.09:  # 0.3 * 0.3
+                        static_mask[i] = False
+                
+                static_points = current_points[static_mask]
+            else:
+                static_points = current_points
             
             # 포인트 클라우드 업데이트
             static_pcd.points = o3d.utility.Vector3dVector(static_points)
-            static_pcd.paint_uniform_color([0.7, 0.7, 0.7])  # 회색
+            static_pcd.colors = o3d.utility.Vector3dVector(np.tile(static_color, (len(static_points), 1)))
             
             point_moving_pcd.points = o3d.utility.Vector3dVector(point_moving)
-            point_moving_pcd.paint_uniform_color([1, 0, 0])  # 빨간색
+            point_moving_pcd.colors = o3d.utility.Vector3dVector(np.tile(point_moving_color, (len(point_moving), 1)))
             
             cluster_moving_pcd.points = o3d.utility.Vector3dVector(cluster_moving)
-            cluster_moving_pcd.paint_uniform_color([0, 1, 0])  # 초록색
+            cluster_moving_pcd.colors = o3d.utility.Vector3dVector(np.tile(cluster_moving_color, (len(cluster_moving), 1)))
             
+            # 상태 출력
             print(f"\r프레임 {idx+1}/{total_frames}: "
                   f"정적: {len(static_points):,}, "
                   f"점 이동: {len(point_moving):,}, "
-                  f"클러스터 이동: {len(cluster_moving):,}", end="")
+                  f"클러스터 이동: {len(cluster_moving):,}", end="", flush=True)
             
+            # 첫 프레임에서만 시점 초기화
             if idx == 0:
                 vis.reset_view_point(True)
             
+            # 지오메트리 업데이트
             vis.update_geometry(static_pcd)
             vis.update_geometry(point_moving_pcd)
             vis.update_geometry(cluster_moving_pcd)
+            
+            # 렌더링
             vis.poll_events()
             vis.update_renderer()
             
-            time.sleep(delay)
+            if delay > 0:
+                time.sleep(delay)
             
     except Exception as e:
         print(f"\n시각화 중 오류 발생: {str(e)}")
+        raise  # 디버깅을 위해 예외 전파
     finally:
         vis.destroy_window()
         print("\n시각화 종료")
@@ -291,7 +316,7 @@ def main():
         
         # 3. 이동 클러스터 검출
         print("\n=== 클러스터 단위 이동 검출 중 ===")
-        moving_clusters_db = detect_moving_clusters(non_floor_points_db, threshold=0.1)
+        moving_clusters_db = detect_moving_clusters(non_floor_points_db, threshold=0.03)
         
         # 4. 데이터 통계 출력
         print("\n=== 데이터 통계 ===")
