@@ -270,6 +270,34 @@ def visualize_sequence(non_floor_points_db: Dict[str, np.ndarray],
     vis.add_geometry(point_moving_pcd)
     vis.add_geometry(cluster_moving_pcd)
     
+    # 바운딩 박스를 저장할 리스트
+    bounding_boxes = []
+    
+    # 클러스터 조건 체크 함수 정의
+    def check_cluster_size(points: np.ndarray) -> bool:
+        if len(points) == 0:
+            return False
+        
+        # 최소/최대 좌표 계산
+        min_coords = np.min(points, axis=0)
+        max_coords = np.max(points, axis=0)
+        sizes = max_coords - min_coords
+        
+        # 너비 조건 체크 (x, y축)
+        width_x = sizes[0]
+        width_y = sizes[1]
+        width_check = width_x <= 2.0 and width_y <= 2.0
+        
+        # 높이 조건 체크 (z축)
+        height = sizes[2]
+        height_check = height <= 2.0
+        
+        # 최저 z값 조건 체크
+        min_z = min_coords[2]
+        ground_check = min_z <= 0.2
+        
+        return width_check and height_check and ground_check
+    
     try:
         sorted_files = sorted(non_floor_points_db.keys())
         total_frames = len(sorted_files)
@@ -279,54 +307,54 @@ def visualize_sequence(non_floor_points_db: Dict[str, np.ndarray],
             point_moving = moving_points_db[file_name]
             cluster_moving = moving_clusters_db[file_name]
             
-            # 클러스터 조건 체크
+            # 이전 프레임의 바운딩 박스 제거
+            # for box in bounding_boxes:
+            #     vis.remove_geometry(box, False)
+            # bounding_boxes.clear()
+            
+            # 클러스터 조건 체크 및 바운딩 박스 생성
             if len(cluster_moving) > 0:
                 cluster_pcd = o3d.geometry.PointCloud()
                 cluster_pcd.points = o3d.utility.Vector3dVector(cluster_moving)
-                labels = np.array(cluster_pcd.cluster_dbscan(eps=0.4, min_points=10))
+                labels = np.array(cluster_pcd.cluster_dbscan(eps=0.4, min_points=20))
                 
                 valid_cluster_points = []
                 unique_labels = np.unique(labels[labels != -1])
-                valid_clusters = 0
-                total_clusters = len(unique_labels)
                 
                 for label in unique_labels:
                     cluster_mask = labels == label
                     cluster_points = cluster_moving[cluster_mask]
                     
-                    if check_cluster_conditions(
-                        cluster_points,
-                        min_width=0.2,
-                        max_width=1.6,
-                        min_height=0.3,
-                        max_height=1.9,
-                        max_ground_height=0.2,
-                        min_points=5,
-                        max_points=70,
-                        min_center_height=0.2,
-                        max_center_height=1.1
-                    ):
-                        valid_cluster_points.extend(cluster_points)
-                        valid_clusters += 1
+                    # 수정된 클러스터 조건 체크
+                    if check_cluster_size(cluster_points):
+                        # 클러스터의 바운딩 박스 생성
+                        min_bound = np.min(cluster_points, axis=0)
+                        max_bound = np.max(cluster_points, axis=0)
+                        center = (min_bound + max_bound) / 2
+                        extent = max_bound - min_bound
+                        
+                        # 바운딩 박스 생성
+                        box = o3d.geometry.OrientedBoundingBox()
+                        box.center = center
+                        box.extent = extent
+                        box.R = np.eye(3)  # 회전 없음
+                        box.color = np.array([0, 1, 0])  # 초록색
+                        
+                        # 바운딩 박스 추가
+                        vis.add_geometry(box, False)
+                        bounding_boxes.append(box)
                         
                         # 디버깅을 위한 클러스터 정보 출력
-                        sizes = np.max(cluster_points, axis=0) - np.min(cluster_points, axis=0)
-                        min_z = np.min(cluster_points[:, 2])
-                        center = np.mean(cluster_points, axis=0)
-                        print(f"\n클러스터 {valid_clusters}:"
+                        sizes = max_bound - min_bound
+                        print(f"\n클러스터 정보:"
                               f"\n - 너비(x)={sizes[0]:.2f}m"
                               f"\n - 너비(y)={sizes[1]:.2f}m"
                               f"\n - 높이={sizes[2]:.2f}m"
-                              f"\n - 최소 z값={min_z:.2f}m"
-                              f"\n - 중심 높이={center[2]:.2f}m"
-                              f"\n - 점 개수={len(cluster_points)}개")
+                              f"\n - 최저 z={min_bound[2]:.2f}m")
+                        
+                        valid_cluster_points.extend(cluster_points)
                 
                 cluster_moving = np.array(valid_cluster_points) if valid_cluster_points else np.zeros((0, 3))
-                
-                # 클러스터 통계 출력
-                if total_clusters > 0:
-                    print(f"\r프레임 {idx+1}/{total_frames}: "
-                          f"총 클러스터 {total_clusters}개 중 {valid_clusters}개 유효", end="", flush=True)
             
             # 정적 점 분리
             if len(point_moving) > 0 or len(cluster_moving) > 0:
@@ -367,6 +395,7 @@ def visualize_sequence(non_floor_points_db: Dict[str, np.ndarray],
             if idx == 0:
                 vis.reset_view_point(True)
             
+            # 지오메트리 업데이트
             vis.update_geometry(static_pcd)
             vis.update_geometry(point_moving_pcd)
             vis.update_geometry(cluster_moving_pcd)
@@ -390,7 +419,7 @@ def main():
     """
     # 설정
     data_directory = "data"
-    target_folder = "01_straight_walk"
+    target_folder = "07_straight_walk"
     voxel_size = 0.2
     
     try:
