@@ -94,7 +94,7 @@ def load_or_process_data(data_dir: str, target_folder: str, voxel_size: float = 
     
     return non_floor_points_db
 
-def detect_moving_points(non_floor_points_db: Dict[str, np.ndarray], threshold: float = 0.2) -> Dict[str, np.ndarray]:
+def detect_moving_points(non_floor_points_db: Dict[str, np.ndarray], threshold: float = 0.1) -> Dict[str, np.ndarray]:
     """
     연속된 프레임에서 이동하는 점들을 검출합니다.
     """
@@ -134,64 +134,132 @@ def detect_moving_points(non_floor_points_db: Dict[str, np.ndarray], threshold: 
     print("\n이동 점 검출 완료!")
     return moving_points_db
 
+def detect_moving_clusters(non_floor_points_db: Dict[str, np.ndarray], 
+                         threshold: float = 0.3) -> Dict[str, np.ndarray]:
+    """
+    클러스터의 중심점 이동을 기반으로 움직이는 클러스터를 검출합니다.
+    """
+    moving_clusters_db = {}
+    sorted_files = sorted(non_floor_points_db.keys())
+    prev_centers = None
+    
+    print("\n클러스터 기반 이동 객체 검출 시작...")
+    
+    # 첫 번째 프레임은 이전 프레임이 없으므로 빈 배열로 설정
+    moving_clusters_db[sorted_files[0]] = np.zeros((0, 3))
+    
+    for idx in range(len(sorted_files)):
+        current_file = sorted_files[idx]
+        current_points = non_floor_points_db[current_file]
+        
+        # 현재 프레임의 포인트 클라우드 생성
+        current_pcd = o3d.geometry.PointCloud()
+        current_pcd.points = o3d.utility.Vector3dVector(current_points)
+        
+        # DBSCAN 클러스터링 수행
+        labels = np.array(current_pcd.cluster_dbscan(eps=0.4, min_points=20))
+        unique_labels = np.unique(labels[labels != -1])
+        
+        # 현재 프레임의 클러스터 중심점 계산
+        current_centers = []
+        cluster_points_list = []
+        
+        for label in unique_labels:
+            cluster_mask = labels == label
+            cluster_points = current_points[cluster_mask]
+            cluster_center = np.mean(cluster_points, axis=0)
+            current_centers.append(cluster_center)
+            cluster_points_list.append(cluster_points)
+        
+        # 이동 클러스터 검출
+        moving_points = []
+        if prev_centers is not None and current_centers:  # 리스트가 비어있지 않은지 확인
+            current_centers_array = np.array(current_centers)
+            prev_centers_array = np.array(prev_centers)
+            
+            if prev_centers_array.size > 0:  # NumPy 배열이 비어있지 않은지 확인
+                for i, cluster_points in enumerate(cluster_points_list):
+                    # 현재 클러스터 중심점과 이전 프레임의 모든 클러스터 중심점들 간의 최소 거리 계산
+                    distances = np.linalg.norm(current_centers_array[i] - prev_centers_array, axis=1)
+                    min_dist = np.min(distances)
+                    if min_dist > threshold:
+                        moving_points.extend(cluster_points)
+        
+        moving_clusters_db[current_file] = np.array(moving_points) if moving_points else np.zeros((0, 3))
+        prev_centers = current_centers  # 리스트 형태로 저장
+        
+        print(f"\r프레임 {idx+1}/{len(sorted_files)}: "
+              f"클러스터 수 {len(current_centers)}, "
+              f"이동 점 수 {len(moving_points)}", end="")
+    
+    print("\n클러스터 기반 이동 객체 검출 완료!")
+    return moving_clusters_db
+
 def visualize_sequence(non_floor_points_db: Dict[str, np.ndarray],
                       moving_points_db: Dict[str, np.ndarray],
-                      delay: float = 0.1,
-                      window_name: str = "Moving Points Detection"):
+                      moving_clusters_db: Dict[str, np.ndarray],
+                      delay: float = 0.1):
     """
-    비바닥 포인트 클라우드 시퀀스를 연속적으로 시각화하며 이동하는 점들을 강조합니다.
+    포인트 클라우드 시퀀스를 시각화합니다.
+    회색: 정적 점들
+    빨간색: 점 단위 이동 검출
+    초록색: 클러스터 단위 이동 검출
     """
     vis = o3d.visualization.Visualizer()
-    vis.create_window(window_name=window_name, width=1024, height=768)
+    vis.create_window("Moving Points Detection", width=1024, height=768)
     
     opt = vis.get_render_option()
     opt.background_color = np.asarray([0, 0, 0])
-    opt.point_size = 1.0
+    opt.point_size = 2.0
     
-    # 정적/이동 포인트 클라우드 객체 생성
     static_pcd = o3d.geometry.PointCloud()
-    moving_pcd = o3d.geometry.PointCloud()
+    point_moving_pcd = o3d.geometry.PointCloud()
+    cluster_moving_pcd = o3d.geometry.PointCloud()
     
     vis.add_geometry(static_pcd)
-    vis.add_geometry(moving_pcd)
+    vis.add_geometry(point_moving_pcd)
+    vis.add_geometry(cluster_moving_pcd)
     
     try:
         sorted_files = sorted(non_floor_points_db.keys())
         total_frames = len(sorted_files)
         
-        print("\n=== 시각화 컨트롤 ===")
-        print("- ESC: 종료")
-        print(f"- 총 프레임 수: {total_frames}")
-        
         for idx, file_name in enumerate(sorted_files):
             current_points = non_floor_points_db[file_name]
-            moving_points = moving_points_db[file_name]
+            point_moving = moving_points_db[file_name]
+            cluster_moving = moving_clusters_db[file_name]
             
-            # 정적인 점들 분리
-            if len(moving_points) > 0:
-                static_mask = np.ones(len(current_points), dtype=bool)
-                for moving_point in moving_points:
-                    distances = np.linalg.norm(current_points - moving_point, axis=1)
-                    static_mask &= (distances > 0.3)  # 이동 점 주변 점들도 제외
-                static_points = current_points[static_mask]
-            else:
-                static_points = current_points
+            # 정적 점들 분리
+            moving_mask = np.ones(len(current_points), dtype=bool)
+            for point in point_moving:
+                distances = np.linalg.norm(current_points - point, axis=1)
+                moving_mask &= (distances > 0.3)
+            for point in cluster_moving:
+                distances = np.linalg.norm(current_points - point, axis=1)
+                moving_mask &= (distances > 0.3)
+            static_points = current_points[moving_mask]
             
             # 포인트 클라우드 업데이트
             static_pcd.points = o3d.utility.Vector3dVector(static_points)
             static_pcd.paint_uniform_color([0.7, 0.7, 0.7])  # 회색
             
-            moving_pcd.points = o3d.utility.Vector3dVector(moving_points)
-            moving_pcd.paint_uniform_color([1, 0, 0])  # 빨간색
+            point_moving_pcd.points = o3d.utility.Vector3dVector(point_moving)
+            point_moving_pcd.paint_uniform_color([1, 0, 0])  # 빨간색
             
-            print(f"\r프레임 {idx+1}/{total_frames}: {file_name} "
-                  f"(이동: {len(moving_points):,}, 정적: {len(static_points):,})", end="")
+            cluster_moving_pcd.points = o3d.utility.Vector3dVector(cluster_moving)
+            cluster_moving_pcd.paint_uniform_color([0, 1, 0])  # 초록색
+            
+            print(f"\r프레임 {idx+1}/{total_frames}: "
+                  f"정적: {len(static_points):,}, "
+                  f"점 이동: {len(point_moving):,}, "
+                  f"클러스터 이동: {len(cluster_moving):,}", end="")
             
             if idx == 0:
                 vis.reset_view_point(True)
             
             vis.update_geometry(static_pcd)
-            vis.update_geometry(moving_pcd)
+            vis.update_geometry(point_moving_pcd)
+            vis.update_geometry(cluster_moving_pcd)
             vis.poll_events()
             vis.update_renderer()
             
@@ -209,7 +277,7 @@ def main():
     """
     # 설정
     data_directory = "data"
-    target_folder = "04_zigzag_walk"
+    target_folder = "06_straight_crawl"
     voxel_size = 0.2
     
     try:
@@ -217,21 +285,27 @@ def main():
         print("=== 데이터 준비 중 ===")
         non_floor_points_db = load_or_process_data(data_directory, target_folder, voxel_size)
         
-        # 2. 이동 점 검출
-        print("\n=== 이동 점 검출 중 ===")
+        # 2. 이동 점 검출 (점 단위)
+        print("\n=== 점 단위 이동 검출 중 ===")
         moving_points_db = detect_moving_points(non_floor_points_db, threshold=0.15)
         
-        # 3. 데이터 통계 출력
+        # 3. 이동 클러스터 검출
+        print("\n=== 클러스터 단위 이동 검출 중 ===")
+        moving_clusters_db = detect_moving_clusters(non_floor_points_db, threshold=0.1)
+        
+        # 4. 데이터 통계 출력
         print("\n=== 데이터 통계 ===")
         print(f"총 프레임 수: {len(non_floor_points_db)}")
         total_points = sum(len(points) for points in non_floor_points_db.values())
-        total_moving = sum(len(points) for points in moving_points_db.values())
+        total_moving_points = sum(len(points) for points in moving_points_db.values())
+        total_moving_clusters = sum(len(points) for points in moving_clusters_db.values())
         print(f"총 포인트 수: {total_points:,}")
-        print(f"총 이동 점 수: {total_moving:,}")
+        print(f"점 단위 이동 수: {total_moving_points:,}")
+        print(f"클러스터 단위 이동 수: {total_moving_clusters:,}")
         
-        # 4. 시각화
+        # 5. 시각화
         print("\n=== 시각화 시작 ===")
-        visualize_sequence(non_floor_points_db, moving_points_db, delay=0.1)
+        visualize_sequence(non_floor_points_db, moving_points_db, moving_clusters_db, delay=0.1)
         
     except Exception as e:
         print(f"\n오류 발생: {str(e)}")
