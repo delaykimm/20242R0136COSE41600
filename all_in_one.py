@@ -90,7 +90,7 @@ def load_or_process_data(data_dir: str, target_folder: str, voxel_size: float = 
     for file_name, points in non_floor_points_db.items():
         save_path = os.path.join(processed_dir, f"{os.path.splitext(file_name)[0]}_non_floor.npy")
         np.save(save_path, points)
-        print(f"저장 완료: {save_path}")
+        print(f"장 완료: {save_path}")
     
     return non_floor_points_db
 
@@ -195,6 +195,52 @@ def detect_moving_clusters(non_floor_points_db: Dict[str, np.ndarray],
     print("\n클러스터 기반 이동 객체 검출 완료!")
     return moving_clusters_db
 
+def check_cluster_conditions(points: np.ndarray, 
+                           min_width: float = 0.2,
+                           max_width: float = 1.6,
+                           min_height: float = 0.3,
+                           max_height: float = 1.9,
+                           max_ground_height: float = 0.1,
+                           min_points: int = 10,
+                           max_points: int = 60,
+                           min_center_height: float = 0.2,
+                           max_center_height: float = 1.0) -> bool:
+    """
+    클러스터가 모든 조건을 만족하는지 확인합니다.
+    1. 너비(x, y축)가 min_width 이상 max_width 미만
+    2. 클러스터의 최소 z값이 max_ground_height보다 작음
+    3. 클러스터의 높이가 min_height 이상 max_height 이하
+    4. 점의 개수가 min_points 이상 max_points 미만
+    5. 클러스터 중심의 높이가 min_center_height 이상 max_center_height 이하
+    """
+    if len(points) == 0 or len(points) >= max_points or len(points) <= min_points:
+        return False
+    
+    # 최소/최대 좌표 계산
+    min_coords = np.min(points, axis=0)
+    max_coords = np.max(points, axis=0)
+    sizes = max_coords - min_coords
+    
+    # 1. 너비 조건 체크 (x, y축)
+    width_x = sizes[0]  # x축 너비
+    width_y = sizes[1]  # y축 너비
+    width_check = (min_width <= width_x < max_width) and (min_width <= width_y < max_width)
+    
+    # 2. 최소 z값 조건 체크 (지면과의 연결 확인)
+    min_z = min_coords[2]
+    ground_check = min_z < max_ground_height
+    
+    # 3. 높이 크기 조건 체크
+    height = sizes[2]  # z축 크기
+    height_check = min_height <= height <= max_height
+    
+    # 4. 클러스터 중심 높이 체크
+    center = np.mean(points, axis=0)
+    center_height = center[2]
+    center_height_check = min_center_height <= center_height <= max_center_height
+    
+    return width_check and ground_check and height_check and center_height_check
+
 def visualize_sequence(non_floor_points_db: Dict[str, np.ndarray],
                       moving_points_db: Dict[str, np.ndarray],
                       moving_clusters_db: Dict[str, np.ndarray],
@@ -233,24 +279,69 @@ def visualize_sequence(non_floor_points_db: Dict[str, np.ndarray],
             point_moving = moving_points_db[file_name]
             cluster_moving = moving_clusters_db[file_name]
             
+            # 클러스터 조건 체크
+            if len(cluster_moving) > 0:
+                cluster_pcd = o3d.geometry.PointCloud()
+                cluster_pcd.points = o3d.utility.Vector3dVector(cluster_moving)
+                labels = np.array(cluster_pcd.cluster_dbscan(eps=0.4, min_points=10))
+                
+                valid_cluster_points = []
+                unique_labels = np.unique(labels[labels != -1])
+                valid_clusters = 0
+                total_clusters = len(unique_labels)
+                
+                for label in unique_labels:
+                    cluster_mask = labels == label
+                    cluster_points = cluster_moving[cluster_mask]
+                    
+                    if check_cluster_conditions(
+                        cluster_points,
+                        min_width=0.2,
+                        max_width=1.6,
+                        min_height=0.3,
+                        max_height=1.9,
+                        max_ground_height=0.2,
+                        min_points=5,
+                        max_points=70,
+                        min_center_height=0.2,
+                        max_center_height=1.1
+                    ):
+                        valid_cluster_points.extend(cluster_points)
+                        valid_clusters += 1
+                        
+                        # 디버깅을 위한 클러스터 정보 출력
+                        sizes = np.max(cluster_points, axis=0) - np.min(cluster_points, axis=0)
+                        min_z = np.min(cluster_points[:, 2])
+                        center = np.mean(cluster_points, axis=0)
+                        print(f"\n클러스터 {valid_clusters}:"
+                              f"\n - 너비(x)={sizes[0]:.2f}m"
+                              f"\n - 너비(y)={sizes[1]:.2f}m"
+                              f"\n - 높이={sizes[2]:.2f}m"
+                              f"\n - 최소 z값={min_z:.2f}m"
+                              f"\n - 중심 높이={center[2]:.2f}m"
+                              f"\n - 점 개수={len(cluster_points)}개")
+                
+                cluster_moving = np.array(valid_cluster_points) if valid_cluster_points else np.zeros((0, 3))
+                
+                # 클러스터 통계 출력
+                if total_clusters > 0:
+                    print(f"\r프레임 {idx+1}/{total_frames}: "
+                          f"총 클러스터 {total_clusters}개 중 {valid_clusters}개 유효", end="", flush=True)
+            
             # 정적 점 분리
             if len(point_moving) > 0 or len(cluster_moving) > 0:
-                # 이동 점들 결합
                 moving_points = np.vstack([point_moving, cluster_moving]) if len(point_moving) > 0 and len(cluster_moving) > 0 else \
                               point_moving if len(point_moving) > 0 else cluster_moving
                 
-                # KDTree 생성
                 moving_pcd = o3d.geometry.PointCloud()
                 moving_pcd.points = o3d.utility.Vector3dVector(moving_points)
                 tree = o3d.geometry.KDTreeFlann(moving_pcd)
                 
-                # 정적 점 마스크 생성
                 static_mask = np.ones(len(current_points), dtype=bool)
                 
-                # 각 점에 대해 가장 가까운 이동 점과의 거리 계산
                 for i in range(len(current_points)):
                     _, _, dist = tree.search_knn_vector_3d(current_points[i], 1)
-                    if np.asarray(dist)[0] < 0.09:  # 0.3 * 0.3
+                    if np.asarray(dist)[0] < 0.09:
                         static_mask[i] = False
                 
                 static_points = current_points[static_mask]
@@ -271,18 +362,15 @@ def visualize_sequence(non_floor_points_db: Dict[str, np.ndarray],
             print(f"\r프레임 {idx+1}/{total_frames}: "
                   f"정적: {len(static_points):,}, "
                   f"점 이동: {len(point_moving):,}, "
-                  f"클러스터 이동: {len(cluster_moving):,}", end="", flush=True)
+                  f"유효 클러스터 이동: {len(cluster_moving):,}", end="", flush=True)
             
-            # 첫 프레임에서만 시점 초기화
             if idx == 0:
                 vis.reset_view_point(True)
             
-            # 지오메트리 업데이트
             vis.update_geometry(static_pcd)
             vis.update_geometry(point_moving_pcd)
             vis.update_geometry(cluster_moving_pcd)
             
-            # 렌더링
             vis.poll_events()
             vis.update_renderer()
             
@@ -291,7 +379,7 @@ def visualize_sequence(non_floor_points_db: Dict[str, np.ndarray],
             
     except Exception as e:
         print(f"\n시각화 중 오류 발생: {str(e)}")
-        raise  # 디버깅을 위해 예외 전파
+        raise
     finally:
         vis.destroy_window()
         print("\n시각화 종료")
@@ -302,7 +390,7 @@ def main():
     """
     # 설정
     data_directory = "data"
-    target_folder = "06_straight_crawl"
+    target_folder = "01_straight_walk"
     voxel_size = 0.2
     
     try:
