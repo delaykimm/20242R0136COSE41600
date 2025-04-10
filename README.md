@@ -1,6 +1,6 @@
 ## 🚗 Pedestrian Detection for Autonomous Vehicles
 
-This repository contains a project aimed at developing algorithms that allow autonomous vehicles to **detect pedestrians** in various real-world scenarios.  
+This repository contains a project aimed at developing algorithms that allow autonomous vehicles to **detect pedestrians** in various real-world scenarios. This project was conducted as a course assignment for 20242R0136COSE41600 SELF-DRIVING CARS at Korea University.
 The dataset includes pedestrians **walking**, **crawling**, **moving in zigzag patterns**, and more—designed to reflect diverse, unpredictable behaviors.
 
 ## 📌 Project Overview
