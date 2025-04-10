@@ -16,7 +16,11 @@ The dataset includes pedestrians **walking**, **crawling**, **moving in zigzag p
 - Visualization for detection results
 
 ## 📂 Project Structure
+
+```
+📁 pedestrian-detection/
 ├── data/              # Pedestrian data under various scenarios
 ├── models/            # Detection algorithms
 ├── utils/             # Preprocessing scripts
-└── README.md
+└── README.md          # Project documentation
+```
