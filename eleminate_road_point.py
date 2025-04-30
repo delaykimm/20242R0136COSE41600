@@ -4,6 +4,27 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 # 1. 평면으로 투영하는 함수
+def project_to_new_plane(points, a, b, c, d):
+    """
+    평면 방정식을 새로운 XY 평면으로 간주하고,
+    모든 포인트를 해당 평면으로 투영하여 새로운 (x, y, z) 좌표를 계산합니다.
+
+    Args:
+        points (numpy.ndarray): 입력 포인트 클라우드, 크기 (N, 3).
+        a, b, c, d (float): 평면 방정식의 계수 (ax + by + cz + d = 0).
+
+    Returns:
+        numpy.ndarray: 변환된 포인트 클라우드, 크기 (N, 3).
+    """
+    print("[DEBUG] Projecting points onto the new plane...")
+    print(f"[DEBUG] Input points shape: {points.shape}")
+    normal = np.array([a, b, c])
+    normal_norm = np.linalg.norm(normal)
+    distances = (a * points[:, 0] + b * points[:, 1] + c * points[:, 2] + d) / normal_norm**2
+    projection = points - distances[:, np.newaxis] * normal  # 투영된 좌표 계산
+    print(f"[DEBUG] Projected points shape: {projection.shape}")
+    return projection
+
 def transform_to_plane_based_coordinates(points, a, b, c, d):
     """
     평면을 새로운 XY 평면으로 간주하고,
@@ -40,6 +61,15 @@ def transform_to_plane_based_coordinates(points, a, b, c, d):
 
     print(f"[DEBUG] Transformed points shape: {transformed_points.shape}")
     return transformed_points
+
+# 2. 격자 크기 조정 함수
+def adjust_grid_size(points, target_bin_count=50):
+    print("[DEBUG] Adjusting grid size...")
+    x_range = np.ptp(points[:, 0])
+    y_range = np.ptp(points[:, 1])
+    grid_size = min(x_range, y_range) / target_bin_count
+    print(f"[DEBUG] Grid size: {grid_size}")
+    return grid_size
 
 # 3. 높이 맵 계산 함수
 def calculate_height_map(points, x_bins, y_bins, threshold=0.2):
@@ -115,31 +145,6 @@ def calculate_height_map(points, x_bins, y_bins, threshold=0.2):
     print(f"[DEBUG] Processed height map size: {len(processed_height_map)}")
     return processed_height_map
 
-def cluster_non_floor_points(non_floor_pcd, eps=0.5, min_points=10):
-    """
-    DBSCAN 클러스터링을 사용하여 비바닥(non-floor) 점을 군집화합니다.
-    
-    Args:
-        non_floor_pcd (open3d.geometry.PointCloud): 비바닥 포인트 클라우드.
-        eps (float): DBSCAN의 클러스터 반경.
-        min_points (int): 클러스터를 형성하기 위한 최소 포인트 수.
-        
-    Returns:
-        list of open3d.geometry.PointCloud: 각 클러스터에 해당하는 포인트 클라우드 리스트.
-    """
-    print("[DEBUG] Performing DBSCAN clustering...")
-    labels = np.array(non_floor_pcd.cluster_dbscan(eps=eps, min_points=min_points, print_progress=True))
-    max_label = labels.max()
-    print(f"[DEBUG] Number of clusters: {max_label + 1}")
-    
-    clusters = []
-    for cluster_id in range(max_label + 1):
-        cluster_indices = np.where(labels == cluster_id)[0]
-        cluster_pcd = non_floor_pcd.select_by_index(cluster_indices)
-        clusters.append(cluster_pcd)
-    
-    return clusters, labels
-
 # 4. 시각화 함수
 def visualize_point_clouds(pcd_list, window_name="ROR Visualization", point_size=0.5):
     # 단일 객체를 리스트로 변환
@@ -155,20 +160,20 @@ def visualize_point_clouds(pcd_list, window_name="ROR Visualization", point_size
     vis.destroy_window()
 
 # 메인 실행 코드
-# file_path = "data/05_straight_duck_walk/pcd/pcd_000370.pcd"
-# file_path = "data/01_straight_walk/pcd/pcd_000250.pcd"
-file_path = "data/04_zigzag_walk/pcd/pcd_000267.pcd"
-# file_path = "data/06_straight_crawl/pcd/pcd_000500.pcd"
-# file_path = "data/02_straight_duck_walk/pcd/pcd_000500.pcd"
-# file_path = "data/03_straight_crawl/pcd/pcd_000900.pcd"
-# file_path = "data/07_straight_walk/pcd/pcd_000350.pcd"
+file_path = "data/05_straight_duck_walk/pcd/pcd_000370.pcd"
+#file_path = "data/01_straight_walk/pcd/pcd_000100.pcd"
+#file_path = "data/04_zigzag_walk/pcd/pcd_000300.pcd"
 original_pcd = o3d.io.read_point_cloud(file_path)
 print(f"[DEBUG] Original point cloud size: {len(original_pcd.points)}")
+print("[INFO] Visualizing original point cloud...")
+# visualize_point_clouds(original_pcd, window_name="Original Point Cloud", point_size=2.0)
 
 # Voxel Downsampling
 voxel_size = 0.05
 downsample_pcd = original_pcd.voxel_down_sample(voxel_size=voxel_size)
 print(f"[DEBUG] Downsampled point cloud size: {len(downsample_pcd.points)}")
+print("[INFO] Visualizing downsampled point cloud...")
+# visualize_point_clouds(downsample_pcd, window_name="Downsampled Point Cloud", point_size=2.0)
 
 # Radius Outlier Removal (ROR)
 cl, ind = downsample_pcd.remove_radius_outlier(nb_points=6, radius=1.2)
@@ -180,6 +185,10 @@ ror_inliers_pcd.paint_uniform_color([0, 1, 0])  # 녹색 (남은 점)
 ror_outliers_pcd = downsample_pcd.select_by_index(ind, invert=True)
 ror_outliers_pcd.paint_uniform_color([1, 0, 0])  # 빨간색 (제거된 점)
 
+# ROR 시각화
+# visualize_point_clouds([ror_inliers_pcd, ror_outliers_pcd], 
+#                       window_name="ROR Visualization: Inliers (Green) & Outliers (Red)", point_size=2.0)
+
 ror_pcd = downsample_pcd.select_by_index(ind)
 print(f"[DEBUG] Point cloud size after ROR: {len(ror_pcd.points)}")
 
@@ -189,10 +198,16 @@ plane_model, inliers = ror_pcd.segment_plane(distance_threshold=0.15, ransac_n=3
 print(f"[DEBUG] Plane equation: {a:.2f}x + {b:.2f}y + {c:.2f}z + {d:.2f} = 0")
 
 ror_points = np.asarray(ror_pcd.points)
+# projected_points = project_to_new_plane(ror_points, a, b, c, d)
 transformed_points = transform_to_plane_based_coordinates(ror_points, a, b, c, d)
 
 # 격자 생성
+# grid_resolution = adjust_grid_size(projected_points, target_bin_count=50)
+#grid_resolution = adjust_grid_size(transformed_points, target_bin_count=50)
 grid_resolution = 0.3
+
+# x_min, y_min = np.min(projected_points[:, :2], axis=0)
+# x_max, y_max = np.max(projected_points[:, :2], axis=0)
 x_min, y_min = np.min(transformed_points[:, :2], axis=0)
 x_max, y_max = np.max(transformed_points[:, :2], axis=0)
 
@@ -221,9 +236,16 @@ print(f"[DEBUG] Total non-floor points: {len(non_floor_indices)}")
 floor_indices = set(range(len(transformed_points))) - set(non_floor_indices)
 print(f"[DEBUG] Total floor points: {len(floor_indices)}")
 
+# Open3D 객체 변환
+projected_pcd = o3d.geometry.PointCloud()
+# projected_pcd.points = o3d.utility.Vector3dVector(projected_points)
+projected_pcd.points = o3d.utility.Vector3dVector(transformed_points)
+
 # 비바닥 및 바닥 포인트
 non_floor_pcd = ror_inliers_pcd.select_by_index(non_floor_indices)
 floor_pcd = ror_inliers_pcd.select_by_index(non_floor_indices, invert=True)
+# road_pcd = ror_inliers_pcd.select_by_index(inliers)
+# non_road_pcd = ror_inliers_pcd.select_by_index(inliers, invert=True)
 
 # 비바닥 점 (non-floor) 개수
 num_non_floor_points = len(non_floor_pcd.points)
@@ -233,21 +255,24 @@ print(f"Number of non-floor points: {num_non_floor_points}")
 num_floor_points = len(floor_pcd.points)
 print(f"Number of floor points: {num_floor_points}")
 
+# # 도로 점 (road) 개수
+# num_road_points = len(road_pcd.points)
+# print(f"Number of road points: {num_road_points}")
+
+# # 도로 아닌 점 (non-road) 개수
+# num_non_road_points = len(non_road_pcd.points)
+# print(f"Number of non-road points: {num_non_road_points}")
+
 # 색상 설정
 floor_pcd.paint_uniform_color([1, 0, 0])  # 빨간색
 non_floor_pcd.paint_uniform_color([0, 1, 0])  # 녹색
 
-# visualize_point_clouds([floor_pcd, non_floor_pcd], 
-#                        window_name="Floor (Red) and Non-Floor (Green) Points", point_size=1.0)
+# road_pcd.paint_uniform_color([1, 0, 0])  # 빨간색
+# non_road_pcd.paint_uniform_color([0, 1, 0])  # 녹색
 
-# 클러스터링 실행
-eps = 0.3  # 클러스터 반경
-min_points = 30  # 클러스터 최소 크기
-clusters, cluster_labels = cluster_non_floor_points(non_floor_pcd, eps=eps, min_points=min_points)
+# 시각화
+# visualize_point_clouds([road_pcd, non_road_pcd], 
+#                        window_name="Road (Red) and Non-Road (Green) Points", point_size=2.0)
 
-# 클러스터링 결과 시각화 (각 클러스터 다른 색상 적용)
-for i, cluster in enumerate(clusters):
-    color = np.random.rand(3)  # 무작위 색상
-    cluster.paint_uniform_color(color)
-
-visualize_point_clouds(clusters, window_name="Clustered Non-Floor Points", point_size=1.0)
+visualize_point_clouds([floor_pcd, non_floor_pcd], 
+                       window_name="Floor (Red) and Non-Floor (Green) Points", point_size=1.0)
